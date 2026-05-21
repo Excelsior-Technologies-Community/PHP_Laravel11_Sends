@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class Send extends Model
 {
     protected $table = 'sends';
+
     protected $fillable = [
         'uuid',
         'mail_class',
@@ -14,7 +15,9 @@ class Send extends Model
         'content',
         'from',
         'to',
+        'status',
         'sent_at',
     ];
+
     public $timestamps = true;
 }
