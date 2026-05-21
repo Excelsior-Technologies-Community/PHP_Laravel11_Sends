@@ -4,51 +4,116 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
-use App\Models\Send; // Use your own model
 use Illuminate\Support\Str;
+use App\Models\Send;
 
 class SendMailController extends Controller
 {
-    // Show email form
+    // Show form
     public function index()
     {
         return view('mailform');
     }
 
-    // Send email and store in DB
+    // Send email + save DB
     public function send(Request $request)
     {
-        $to = $request->to ?? 'recipient@example.com';
+        $request->validate([
+            'to' => 'required|email'
+        ]);
+
+        $to = $request->to;
+
+        $subject = 'Test Email from Laravel Sends';
 
         $data = [
             'title' => 'Welcome to Laravel Sends',
-            'body'  => 'This is a test email using Laravel Sends!'
+            'body' => 'This is a test email using Laravel Sends!'
         ];
 
-        // Send email
-        Mail::send('emails.hello', $data, function ($message) use ($to) {
-            $message->to($to)
-                    ->subject('Test Email from Laravel Sends');
-        });
+        try {
 
-        // Store email in DB
-        Send::create([
-            'uuid'       => Str::uuid(),
-            'mail_class' => null,
-            'subject'    => 'Test Email from Laravel Sends',
-            'content'    => view('emails.hello', $data)->render(),
-            'from'       => config('mail.from.address'), // safe now
-            'to'         => $to,
-            'sent_at'    => now(),
-        ]);
+            Mail::send(
+                'emails.hello',
+                $data,
+                function ($message) use ($to, $subject) {
 
-        return back()->with('success', "Email sent and stored in DB to $to!");
+                    $message->from(
+                        env('MAIL_FROM_ADDRESS'),
+                        env('MAIL_FROM_NAME')
+                    );
+
+                    $message->to($to)
+                            ->subject($subject);
+                }
+            );
+
+            Send::create([
+                'uuid' => Str::uuid(),
+                'mail_class' => null,
+                'subject' => $subject,
+                'content' => $data['body'],
+                'from' => env('MAIL_FROM_ADDRESS'),
+                'to' => $to,
+                'status' => 'sent',
+                'sent_at' => now(),
+            ]);
+
+            return back()->with(
+                'success',
+                'Email sent successfully to '.$to
+            );
+
+        } catch (\Exception $e) {
+
+            \Log::error($e->getMessage());
+
+            Send::create([
+                'uuid' => Str::uuid(),
+                'mail_class' => null,
+                'subject' => $subject,
+                'content' => $e->getMessage(),
+                'from' => env('MAIL_FROM_ADDRESS'),
+                'to' => $to,
+                'status' => 'failed',
+                'sent_at' => now(),
+            ]);
+
+            return back()->with(
+                'error',
+                'Email failed: '.$e->getMessage()
+            );
+        }
     }
 
-    // Show all sent emails
-    public function allSends()
+    // LIST + SEARCH + FILTER
+    public function allSends(Request $request)
     {
-        $emails = Send::latest()->get();
-        return view('sends', compact('emails'));
+        $query = Send::query();
+
+        if ($request->search) {
+
+            $query->where('to', 'like', '%' . $request->search . '%')
+                  ->orWhere(
+                      'subject',
+                      'like',
+                      '%' . $request->search . '%'
+                  );
+        }
+
+        if ($request->status) {
+
+            $query->where(
+                'status',
+                $request->status
+            );
+        }
+
+      $emails = $query->orderBy('id', 'asc')->paginate(2);
+      
+        return view(
+            'sends',
+            compact('emails')
+        );
     }
 }
