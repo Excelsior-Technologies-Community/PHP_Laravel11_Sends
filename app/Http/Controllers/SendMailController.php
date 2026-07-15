@@ -2,88 +2,53 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\SendQueuedMailJob;
+use App\Models\Send;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
-use App\Models\Send;
 
 class SendMailController extends Controller
 {
-    // Show form
     public function index()
     {
         return view('mailform');
     }
 
-    // Send email + save DB
+    // ── Feature 1: Queue + Rate Limiter + Failover dispatch ─────────────────
     public function send(Request $request)
     {
-        $request->validate([
-            'to' => 'required|email'
-        ]);
+        $request->validate(['to' => 'required|email']);
 
-        $to = $request->to;
+        $rateLimitKey = 'mail_rate_' . now()->format('Y_m_d_H_i');
+        $currentCount = (int) Cache::get($rateLimitKey, 0);
 
-        $subject = 'Test Email from Laravel Sends';
+        // Dynamic threshold check before even queuing
+        if ($currentCount >= 50) {
+            Log::warning("[RateLimiter] Burst limit hit. Queuing deferred for: {$request->to}");
+            return back()->with('error', 'Rate limit reached (50/min). Email queued for next window.');
+        }
 
         $data = [
             'title' => 'Welcome to Laravel Sends',
-            'body' => 'This is a test email using Laravel Sends!'
+            'body'  => 'This is a test email using Laravel Sends!',
         ];
 
-        try {
+        // Dispatch to queue — job handles failover + rate tracking
+        SendQueuedMailJob::dispatch(
+            $request->to,
+            'Test Email from Laravel Sends',
+            $data,
+            'emails.hello',
+            null,
+            $request->mailer ?? config('mail.default')
+        );
 
-            Mail::send(
-                'emails.hello',
-                $data,
-                function ($message) use ($to, $subject) {
+        Log::info("[SendMailController] Queued email to: {$request->to}");
 
-                    $message->from(
-                        env('MAIL_FROM_ADDRESS'),
-                        env('MAIL_FROM_NAME')
-                    );
-
-                    $message->to($to)
-                            ->subject($subject);
-                }
-            );
-
-            Send::create([
-                'uuid' => Str::uuid(),
-                'mail_class' => null,
-                'subject' => $subject,
-                'content' => $data['body'],
-                'from' => env('MAIL_FROM_ADDRESS'),
-                'to' => $to,
-                'status' => 'sent',
-                'sent_at' => now(),
-            ]);
-
-            return back()->with(
-                'success',
-                'Email sent successfully to '.$to
-            );
-
-        } catch (\Exception $e) {
-
-            \Log::error($e->getMessage());
-
-            Send::create([
-                'uuid' => Str::uuid(),
-                'mail_class' => null,
-                'subject' => $subject,
-                'content' => $e->getMessage(),
-                'from' => env('MAIL_FROM_ADDRESS'),
-                'to' => $to,
-                'status' => 'failed',
-                'sent_at' => now(),
-            ]);
-
-            return back()->with(
-                'error',
-                'Email failed: '.$e->getMessage()
-            );
-        }
+        return back()->with('success', "Email queued successfully for {$request->to}!");
     }
 
     // LIST + SEARCH + FILTER
@@ -92,28 +57,18 @@ class SendMailController extends Controller
         $query = Send::query();
 
         if ($request->search) {
-
-            $query->where('to', 'like', '%' . $request->search . '%')
-                  ->orWhere(
-                      'subject',
-                      'like',
-                      '%' . $request->search . '%'
-                  );
+            $query->where(function ($q) use ($request) {
+                $q->where('to', 'like', '%' . $request->search . '%')
+                  ->orWhere('subject', 'like', '%' . $request->search . '%');
+            });
         }
 
         if ($request->status) {
-
-            $query->where(
-                'status',
-                $request->status
-            );
+            $query->where('status', $request->status);
         }
 
-      $emails = $query->orderBy('id', 'asc')->paginate(2);
-      
-        return view(
-            'sends',
-            compact('emails')
-        );
+        $emails = $query->orderBy('id', 'desc')->paginate(10);
+
+        return view('sends', compact('emails'));
     }
 }
